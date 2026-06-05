@@ -3,15 +3,27 @@ import { atomWithStorage } from 'jotai/utils';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePathname } from './utils/spa-navigate';
 
-const ROWS = [
-  ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '^'],
-  ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '@', '['],
-  ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', ':', ']'],
-  ['lshift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 'rshift'],
-  [' '],
-] as const satisfies readonly (readonly string[])[];
+const KEYBOARD_ROWS = {
+  jis: [
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '^'],
+    ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '@', '['],
+    ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', ':', ']'],
+    ['lshift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 'rshift'],
+    [' '],
+  ],
+  us: [
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '='],
+    ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\\'],
+    ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', "'"],
+    ['lshift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 'rshift'],
+    [' '],
+  ],
+} as const satisfies Record<KeyboardLayout, readonly (readonly string[])[]>;
 
-const KEY_SET = new Set<string>(ROWS.flat());
+const KEY_SETS = {
+  jis: new Set<string>(KEYBOARD_ROWS.jis.flat()),
+  us: new Set<string>(KEYBOARD_ROWS.us.flat()),
+} as const satisfies Record<KeyboardLayout, ReadonlySet<string>>;
 
 const KEY_REFRESH_EVENTS = ['type:success'] as const;
 
@@ -19,23 +31,68 @@ const KEY_UPDATE_ONLY_EVENTS = ['timer:lineChange'] as const;
 const RESET_REPLAY_EVENTS = ['restart'] as const;
 const REPLAY_START_EVENTS = ['replay:start'] as const;
 
-const ROW_PADDING = ['', 'pl-3', 'pl-[18px]', '', ''] as const;
+const ROW_PADDING = {
+  jis: ['', 'pl-3', 'pl-[18px]', '', ''],
+  us: ['', '', 'pl-[18px]', '', ''],
+} as const satisfies Record<KeyboardLayout, readonly string[]>;
 
-const SHIFT_LABELS: Record<string, string> = {
-  '1': '!', '2': '"', '3': '#', '4': '$', '5': '%',
-  '6': '&', '7': "'", '8': '(', '9': ')',
-  '-': '=', '^': '~',
-  '@': '`', '[': '{',
-  ';': '+', ':': '*', ']': '}',
-  ',': '<', '.': '>', '/': '?',
+const SHIFT_LABELS: Record<KeyboardLayout, Record<string, string>> = {
+  jis: {
+    '1': '!', '2': '"', '3': '#', '4': '$', '5': '%',
+    '6': '&', '7': "'", '8': '(', '9': ')',
+    '-': '=', '^': '~',
+    '@': '`', '[': '{',
+    ';': '+', ':': '*', ']': '}',
+    ',': '<', '.': '>', '/': '?',
+  },
+  us: {
+    '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+    '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+    '-': '_', '=': '+',
+    '[': '{', ']': '}', '\\': '|',
+    ';': ':', "'": '"',
+    ',': '<', '.': '>', '/': '?',
+  },
 };
 
-const SHIFT_KEYS = Object.fromEntries(
-  Object.entries(SHIFT_LABELS).map(([key, shifted]) => [shifted, key]),
-) as Record<string, string>;
+const SHIFT_KEYS: Record<KeyboardLayout, Record<string, string>> = {
+  jis: Object.fromEntries(
+    Object.entries(SHIFT_LABELS.jis).map(([key, shifted]) => [shifted, key]),
+  ),
+  us: Object.fromEntries(
+    Object.entries(SHIFT_LABELS.us).map(([key, shifted]) => [shifted, key]),
+  ),
+};
 
 const EVENT_KEY_ALIASES: Record<string, string> = {
   Spacebar: ' ',
+};
+
+const EVENT_CODE_ALIASES: Record<KeyboardLayout, Record<string, string>> = {
+  jis: {
+    Minus: '-',
+    Equal: '^',
+    BracketLeft: '@',
+    BracketRight: '[',
+    Semicolon: ';',
+    Quote: ':',
+    Backslash: ']',
+    Comma: ',',
+    Period: '.',
+    Slash: '/',
+  },
+  us: {
+    Minus: '-',
+    Equal: '=',
+    BracketLeft: '[',
+    BracketRight: ']',
+    Backslash: '\\',
+    Semicolon: ';',
+    Quote: "'",
+    Comma: ',',
+    Period: '.',
+    Slash: '/',
+  },
 };
 
 const VISIBILITY_MODE_ORDER = ['always', 'replay', 'hidden'] as const satisfies readonly VisibilityMode[];
@@ -48,6 +105,7 @@ const VISIBILITY_MODE_LABELS: Record<VisibilityMode, string> = {
 type Position = { x: number; y: number };
 type ResizeCorner = 'tl' | 'tr' | 'bl' | 'br';
 type VisibilityMode = 'always' | 'replay' | 'hidden';
+type KeyboardLayout = 'jis' | 'us';
 type ResizeState = {
   corner: ResizeCorner;
   anchorX: number; // 反対の角のX座標 (viewport基準)
@@ -60,6 +118,7 @@ const positionAtom = atomWithStorage<Position | null>('yt-kbd-position', null);
 const scaleAtom = atomWithStorage<number>('yt-kbd-scale', 1);
 const visibilityModeAtom = atomWithStorage<VisibilityMode>('yt-kbd-visibility-mode', 'always');
 const notesEnabledAtom = atomWithStorage<boolean>('yt-kbd-notes-enabled', false);
+const keyboardLayoutAtom = atomWithStorage<KeyboardLayout>('yt-kbd-layout', 'jis');
 
 
 // コーナーごとのスタイル定義
@@ -70,25 +129,25 @@ const CORNERS: { corner: ResizeCorner; cls: string; cursor: string }[] = [
   { corner: 'br', cls: 'bottom-0 right-0 border-b border-r', cursor: 'cursor-nwse-resize' },
 ];
 
-function resolveNextKeys(): string[] {
+function resolveNextKeys(layout: KeyboardLayout): string[] {
   const word = window.__ytyping_type?.getTypingWord();
   if (!word) return [];
   const { nextChunk, tempRomaPatterns } = word;
-  const key = normalizeKey(tempRomaPatterns?.[0]?.[0] ?? nextChunk?.romaPatterns?.[0]?.[0]);
+  const key = normalizeKey(tempRomaPatterns?.[0]?.[0] ?? nextChunk?.romaPatterns?.[0]?.[0], layout);
   return key ? [key] : [];
 }
 
-function normalizeKey(key: string | undefined): string | null {
+function normalizeKey(key: string | undefined, layout: KeyboardLayout): string | null {
   if (!key) return null;
   if (key === ' ') return ' ';
 
-  const normalizedKey = EVENT_KEY_ALIASES[key] ?? SHIFT_KEYS[key] ?? key.toLowerCase();
-  return KEY_SET.has(normalizedKey) ? normalizedKey : null;
+  const normalizedKey = EVENT_KEY_ALIASES[key] ?? SHIFT_KEYS[layout][key] ?? key.toLowerCase();
+  return KEY_SETS[layout].has(normalizedKey) ? normalizedKey : null;
 }
 
-function resolvePressedKey(e: KeyboardEvent): string | null {
+function resolvePressedKey(e: KeyboardEvent, layout: KeyboardLayout): string | null {
   if (e.key === 'Shift') return e.location === 1 ? 'lshift' : 'rshift';
-  return normalizeKey(e.key);
+  return normalizeKey(e.key, layout) ?? normalizeKey(EVENT_CODE_ALIASES[layout][e.code], layout);
 }
 
 function isReplayScene(detail?: unknown): boolean {
@@ -107,6 +166,7 @@ function KeyboardViewer() {
   const [scale, setScale] = useAtom(scaleAtom);
   const [visibilityMode, setVisibilityMode] = useAtom(visibilityModeAtom);
   const [notesEnabled, setNotesEnabled] = useAtom(notesEnabledAtom);
+  const [keyboardLayout, setKeyboardLayout] = useAtom(keyboardLayoutAtom);
   const [isVisible, setIsVisible] = useState(false);
   const [isReplayMode, setIsReplayMode] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -115,6 +175,7 @@ function KeyboardViewer() {
   const dragOffset = useRef<Position>({ x: 0, y: 0 });
   const resizeRef = useRef<ResizeState | null>(null);
   const nextKeysRef = useRef<ReadonlySet<string>>(new Set());
+  const keyboardLayoutRef = useRef<KeyboardLayout>('jis');
   const notesEnabledRef = useRef(false);
   const [shiftActive, setShiftActive] = useState<'lshift' | 'rshift' | false>(false);
   type Burst = { id: number; x: number };
@@ -123,6 +184,11 @@ function KeyboardViewer() {
   const burstTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   notesEnabledRef.current = notesEnabled;
+  keyboardLayoutRef.current = keyboardLayout;
+
+  const rows = KEYBOARD_ROWS[keyboardLayout];
+  const rowPadding = ROW_PADDING[keyboardLayout];
+  const shiftLabels = SHIFT_LABELS[keyboardLayout];
 
   const isGuideVisible =
     isVisible && (visibilityMode === 'always' || (visibilityMode === 'replay' && isReplayMode));
@@ -151,7 +217,7 @@ function KeyboardViewer() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const key = resolvePressedKey(e);
+      const key = resolvePressedKey(e, keyboardLayoutRef.current);
       if (key) {
         if (!e.repeat && nextKeysRef.current.has(key)) {
           if (notesEnabledRef.current) addBurst(key);
@@ -162,7 +228,7 @@ function KeyboardViewer() {
       if (e.key === 'Shift') setShiftActive(e.location === 1 ? 'lshift' : 'rshift');
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      const key = resolvePressedKey(e);
+      const key = resolvePressedKey(e, keyboardLayoutRef.current);
       if (key) {
         setPressedKeys((prev) => {
           const next = new Set(prev);
@@ -193,13 +259,22 @@ function KeyboardViewer() {
   }, [addBurst]);
 
   useEffect(() => {
+    const nextKeys = resolveNextKeys(keyboardLayout);
+    nextKeysRef.current = new Set(nextKeys);
+    setNextKeys(new Set(nextKeys));
+    setPressedKeys(new Set());
+    setAcceptedPressedKeys(new Set());
+    setShiftActive(false);
+  }, [keyboardLayout]);
+
+  useEffect(() => {
     const hook = window.__ytyping_type;
     if (!hook) return;
 
     const show = () => setIsVisible(true);
     const refreshKey = () => {
       show();
-      const nextKeys = resolveNextKeys();
+      const nextKeys = resolveNextKeys(keyboardLayoutRef.current);
       nextKeysRef.current = new Set(nextKeys);
       setNextKeys(new Set(nextKeys));
     };
@@ -411,18 +486,34 @@ function KeyboardViewer() {
               });
             }}
             className={[
-              'absolute top-1 right-1 z-20 hidden group-hover:flex h-6 w-6 items-center justify-center',
+              'absolute top-1 right-1 z-20 hidden group-hover:flex h-5 w-5 items-center justify-center',
               'rounded border backdrop-blur-[6px] transition-[background,border-color,color,box-shadow] duration-150 cursor-pointer',
               notesEnabled
                 ? 'bg-primary text-primary-foreground border-primary shadow-[0_0_6px_color-mix(in_oklab,var(--primary)_35%,transparent)]'
                 : 'bg-overlay-background text-overlay-foreground/50 border-overlay-foreground/20',
             ].join(' ')}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 18V5l12-2v13" />
               <circle cx="6" cy="18" r="3" />
               <circle cx="18" cy="16" r="3" />
             </svg>
+          </button>
+          <button
+            type="button"
+            title={`keyboard layout: ${keyboardLayout.toUpperCase()}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              setKeyboardLayout((layout) => layout === 'jis' ? 'us' : 'jis');
+            }}
+            className={[
+              'absolute top-1 right-7 z-20 hidden group-hover:flex h-5 w-8 items-center justify-center',
+              'rounded border bg-overlay-background text-[9px] font-bold text-overlay-foreground backdrop-blur-[6px]',
+              'transition-[background,border-color,color] duration-150 cursor-pointer border-overlay-foreground/20',
+            ].join(' ')}
+          >
+            {keyboardLayout.toUpperCase()}
           </button>
           {/* 単体ノート ヒットエフェクト */}
           {bursts.map(({ id, x }) => (
@@ -453,10 +544,10 @@ function KeyboardViewer() {
             </div>
           ))}
 
-          {ROWS.map((row, ri) => (
+          {rows.map((row, ri) => (
             <div
               key={ri}
-              className={`flex gap-0.5 mb-0.5 last:mb-0 ${ri === ROWS.length - 1 ? 'justify-center' : 'justify-start'} ${ROW_PADDING[ri]}`}
+              className={`flex gap-0.5 mb-0.5 last:mb-0 ${ri === rows.length - 1 ? 'justify-center' : 'justify-start'} ${rowPadding[ri]}`}
             >
               {row.map((key) => {
                 const isSpace = key === ' ';
@@ -466,7 +557,7 @@ function KeyboardViewer() {
                 const isAcceptedPressed = acceptedPressedKeys.has(key);
                 const isMistype = isPressed && !isNext && !isAcceptedPressed;
                 const label = isSpace ? '' : isShift ? '⇧'
-                  : shiftActive ? (SHIFT_LABELS[key] ?? key.toUpperCase())
+                  : shiftActive ? (shiftLabels[key] ?? key.toUpperCase())
                   : key.toUpperCase();
                 return (
                   <div
@@ -475,7 +566,7 @@ function KeyboardViewer() {
                     className={[
                       'flex items-center justify-center rounded-[3px] font-semibold border h-5',
                       'transition-[background,color,border-color,box-shadow] duration-[60ms]',
-                      isSpace ? 'w-[108px]' : isShift ? 'w-[30px] text-xs' : 'w-[22px] text-[10px]',
+                      isSpace ? 'w-[130px]' : isShift ? 'w-[30px] text-xs' : 'w-[22px] text-[10px]',
                       isNext
                         ? 'bg-primary-light text-primary-foreground border-primary-light shadow-[0_0_8px_color-mix(in_oklab,var(--primary-light)_55%,transparent)]'
                         : isMistype
