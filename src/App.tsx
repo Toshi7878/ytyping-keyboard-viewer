@@ -11,12 +11,13 @@ const ROWS = [
   [' '],
 ] as const satisfies readonly (readonly string[])[];
 
-const HOOK_EVENTS = [
-  'type:success',
-  'replay:success',
-  'timer:lineChange',
-  'restart',
-] as const;
+const KEY_SET = new Set<string>(ROWS.flat());
+
+const KEY_REFRESH_EVENTS = ['type:success'] as const;
+
+const KEY_UPDATE_ONLY_EVENTS = ['timer:lineChange'] as const;
+const RESET_REPLAY_EVENTS = ['restart'] as const;
+const REPLAY_START_EVENTS = ['replay:start'] as const;
 
 const ROW_PADDING = ['', 'pl-3', 'pl-[18px]', '', ''] as const;
 
@@ -29,8 +30,24 @@ const SHIFT_LABELS: Record<string, string> = {
   ',': '<', '.': '>', '/': '?',
 };
 
+const SHIFT_KEYS = Object.fromEntries(
+  Object.entries(SHIFT_LABELS).map(([key, shifted]) => [shifted, key]),
+) as Record<string, string>;
+
+const EVENT_KEY_ALIASES: Record<string, string> = {
+  Spacebar: ' ',
+};
+
+const VISIBILITY_MODE_ORDER = ['always', 'replay', 'hidden'] as const satisfies readonly VisibilityMode[];
+const VISIBILITY_MODE_LABELS: Record<VisibilityMode, string> = {
+  always: 'キーボードガイドを常に表示',
+  replay: 'キーボードガイドをリプレイ時のみ表示',
+  hidden: 'キーボードガイドを隠す',
+};
+
 type Position = { x: number; y: number };
 type ResizeCorner = 'tl' | 'tr' | 'bl' | 'br';
+type VisibilityMode = 'always' | 'replay' | 'hidden';
 type ResizeState = {
   corner: ResizeCorner;
   anchorX: number; // 反対の角のX座標 (viewport基準)
@@ -41,7 +58,9 @@ type ResizeState = {
 
 const positionAtom = atomWithStorage<Position | null>('yt-kbd-position', null);
 const scaleAtom = atomWithStorage<number>('yt-kbd-scale', 1);
-const userVisibleAtom = atomWithStorage<boolean>('yt-kbd-user-visible', true);
+const visibilityModeAtom = atomWithStorage<VisibilityMode>('yt-kbd-visibility-mode', 'always');
+const notesEnabledAtom = atomWithStorage<boolean>('yt-kbd-notes-enabled', false);
+
 
 // コーナーごとのスタイル定義
 const CORNERS: { corner: ResizeCorner; cls: string; cursor: string }[] = [
@@ -51,61 +70,195 @@ const CORNERS: { corner: ResizeCorner; cls: string; cursor: string }[] = [
   { corner: 'br', cls: 'bottom-0 right-0 border-b border-r', cursor: 'cursor-nwse-resize' },
 ];
 
-function resolveNextKey(): string | null {
+function resolveNextKeys(): string[] {
   const word = window.__ytyping_type?.getTypingWord();
-  if (!word) return null;
+  if (!word) return [];
   const { nextChunk, tempRomaPatterns } = word;
-  return (
-    tempRomaPatterns?.[0]?.[0]?.toLowerCase() ??
-    nextChunk?.romaPatterns?.[0]?.[0]?.toLowerCase() ??
-    null
-  );
+  const key = normalizeKey(tempRomaPatterns?.[0]?.[0] ?? nextChunk?.romaPatterns?.[0]?.[0]);
+  return key ? [key] : [];
+}
+
+function normalizeKey(key: string | undefined): string | null {
+  if (!key) return null;
+  if (key === ' ') return ' ';
+
+  const normalizedKey = EVENT_KEY_ALIASES[key] ?? SHIFT_KEYS[key] ?? key.toLowerCase();
+  return KEY_SET.has(normalizedKey) ? normalizedKey : null;
+}
+
+function resolvePressedKey(e: KeyboardEvent): string | null {
+  if (e.key === 'Shift') return e.location === 1 ? 'lshift' : 'rshift';
+  return normalizeKey(e.key);
+}
+
+function isReplayScene(detail?: unknown): boolean {
+  if (typeof detail === 'object' && detail !== null && 'scene' in detail) {
+    return (detail as { scene?: unknown }).scene === 'replay';
+  }
+
+  return window.__ytyping_type?.getScene?.() === 'replay';
 }
 
 function KeyboardViewer() {
-  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [nextKeys, setNextKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [pressedKeys, setPressedKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [acceptedPressedKeys, setAcceptedPressedKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [position, setPosition] = useAtom(positionAtom);
   const [scale, setScale] = useAtom(scaleAtom);
-  const [userVisible, setUserVisible] = useAtom(userVisibleAtom);
+  const [visibilityMode, setVisibilityMode] = useAtom(visibilityModeAtom);
+  const [notesEnabled, setNotesEnabled] = useAtom(notesEnabledAtom);
   const [isVisible, setIsVisible] = useState(false);
+  const [isReplayMode, setIsReplayMode] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const isDragging = useRef(false);
   const dragOffset = useRef<Position>({ x: 0, y: 0 });
   const resizeRef = useRef<ResizeState | null>(null);
+  const nextKeysRef = useRef<ReadonlySet<string>>(new Set());
+  const notesEnabledRef = useRef(false);
   const [shiftActive, setShiftActive] = useState<'lshift' | 'rshift' | false>(false);
+  type Burst = { id: number; x: number };
+  const [bursts, setBursts] = useState<Burst[]>([]);
+  const burstIdRef = useRef(0);
+  const burstTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  notesEnabledRef.current = notesEnabled;
+
+  const isGuideVisible =
+    isVisible && (visibilityMode === 'always' || (visibilityMode === 'replay' && isReplayMode));
+
+  const getKeyX = useCallback((key: string | null) => {
+    let x = 50;
+    if (key && containerRef.current) {
+      const el = containerRef.current.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`);
+      if (el) {
+        const cr = containerRef.current.getBoundingClientRect();
+        const kr = el.getBoundingClientRect();
+        x = ((kr.left + kr.right) / 2 - cr.left) / cr.width * 100;
+      }
+    }
+    return x;
+  }, []);
+
+  const addBurst = useCallback((key: string | null) => {
+    const id = ++burstIdRef.current;
+    setBursts((prev) => [...prev, { id, x: getKeyX(key) }]);
+    const tid = setTimeout(() => {
+      setBursts((prev) => prev.filter((b) => b.id !== id));
+    }, 480);
+    burstTimersRef.current.push(tid);
+  }, [getKeyX]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const key = resolvePressedKey(e);
+      if (key) {
+        if (!e.repeat && nextKeysRef.current.has(key)) {
+          if (notesEnabledRef.current) addBurst(key);
+          setAcceptedPressedKeys((prev) => new Set(prev).add(key));
+        }
+        setPressedKeys((prev) => new Set(prev).add(key));
+      }
       if (e.key === 'Shift') setShiftActive(e.location === 1 ? 'lshift' : 'rshift');
     };
     const onKeyUp = (e: KeyboardEvent) => {
+      const key = resolvePressedKey(e);
+      if (key) {
+        setPressedKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+        setAcceptedPressedKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+      }
       if (e.key === 'Shift') setShiftActive(false);
+    };
+    const onBlur = () => {
+      setPressedKeys(new Set());
+      setAcceptedPressedKeys(new Set());
+      setShiftActive(false);
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
     };
-  }, []);
+  }, [addBurst]);
 
   useEffect(() => {
     const hook = window.__ytyping_type;
     if (!hook) return;
 
     const show = () => setIsVisible(true);
-    const updateKey = () => { show(); setActiveKey(resolveNextKey()); };
-    const onEnd = () => { setIsVisible(false); setActiveKey(null); };
+    const refreshKey = () => {
+      show();
+      const nextKeys = resolveNextKeys();
+      nextKeysRef.current = new Set(nextKeys);
+      setNextKeys(new Set(nextKeys));
+    };
+    const updateKey = () => {
+      setIsReplayMode(false);
+      refreshKey();
+    };
+    const updateReplayKey = () => {
+      setIsReplayMode(true);
+      const [currentKey] = nextKeysRef.current;
+      if (notesEnabledRef.current) addBurst(currentKey ?? null);
+      refreshKey();
+    };
+    const startReplay = () => {
+      setIsReplayMode(true);
+      refreshKey();
+    };
+    const onPlay = (detail: unknown) => {
+      if (isReplayScene(detail)) {
+        startReplay();
+        return;
+      }
 
-    HOOK_EVENTS.forEach((e) => hook.addEventListener(e, updateKey));
-    hook.addEventListener('yt:play', show);
+      refreshKey();
+    };
+    const resetReplayAndUpdateKey = () => {
+      setIsReplayMode(false);
+      refreshKey();
+    };
+    const onEnd = () => {
+      setIsVisible(false);
+      setIsReplayMode(false);
+      nextKeysRef.current = new Set();
+      setNextKeys(new Set());
+      setPressedKeys(new Set());
+      setAcceptedPressedKeys(new Set());
+      setBursts([]);
+      burstTimersRef.current.forEach(clearTimeout);
+      burstTimersRef.current = [];
+    };
+
+    KEY_REFRESH_EVENTS.forEach((e) => hook.addEventListener(e, updateKey));
+    REPLAY_START_EVENTS.forEach((e) => hook.addEventListener(e, startReplay));
+    hook.addEventListener('replay:success', updateReplayKey);
+    KEY_UPDATE_ONLY_EVENTS.forEach((e) => hook.addEventListener(e, refreshKey));
+    RESET_REPLAY_EVENTS.forEach((e) => hook.addEventListener(e, resetReplayAndUpdateKey));
+    hook.addEventListener('yt:play', onPlay);
     hook.addEventListener('timer:end', onEnd);
 
     return () => {
-      HOOK_EVENTS.forEach((e) => hook.removeEventListener(e, updateKey));
-      hook.removeEventListener('yt:play', show);
+      KEY_REFRESH_EVENTS.forEach((e) => hook.removeEventListener(e, updateKey));
+      REPLAY_START_EVENTS.forEach((e) => hook.removeEventListener(e, startReplay));
+      hook.removeEventListener('replay:success', updateReplayKey);
+      KEY_UPDATE_ONLY_EVENTS.forEach((e) => hook.removeEventListener(e, refreshKey));
+      RESET_REPLAY_EVENTS.forEach((e) => hook.removeEventListener(e, resetReplayAndUpdateKey));
+      hook.removeEventListener('yt:play', onPlay);
       hook.removeEventListener('timer:end', onEnd);
+      burstTimersRef.current.forEach(clearTimeout);
+      burstTimersRef.current = [];
     };
   }, []);
 
@@ -205,53 +358,128 @@ function KeyboardViewer() {
     <>
       {/* トグルボタン（常時表示） */}
       <button
-        onClick={() => setUserVisible((v) => !v)}
-        title={userVisible ? 'キーボードガイドを隠す' : 'キーボードガイドを表示'}
+        onClick={() => setVisibilityMode((mode) => {
+          const currentIndex = VISIBILITY_MODE_ORDER.indexOf(mode);
+          return VISIBILITY_MODE_ORDER[(currentIndex + 1) % VISIBILITY_MODE_ORDER.length];
+        })}
+        title={VISIBILITY_MODE_LABELS[visibilityMode]}
         className={[
           'fixed bottom-3 right-3 z-50 w-9 h-9 flex items-center justify-center',
           'rounded-lg border backdrop-blur-[6px] transition-[background,border-color,color] duration-150 cursor-pointer',
-          userVisible
+          visibilityMode === 'always'
             ? 'bg-primary text-primary-foreground border-primary'
-            : 'bg-overlay-background text-overlay-foreground/50 border-overlay-foreground/20',
+            : visibilityMode === 'replay'
+              ? 'bg-overlay-background text-primary border-primary/60'
+              : 'bg-overlay-background text-overlay-foreground/50 border-overlay-foreground/20',
         ].join(' ')}
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <rect width="20" height="16" x="2" y="4" rx="2" ry="2"/>
           <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>
         </svg>
+        {visibilityMode === 'replay' && (
+          <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded bg-primary px-1 text-[10px] font-bold leading-none text-primary-foreground">
+            R
+          </span>
+        )}
       </button>
 
       {/* キーボードパネル（プレイ中 かつ ユーザーが表示中のときのみ） */}
-      {isVisible && userVisible && (
+      {isGuideVisible && (
         <div
           ref={containerRef}
           style={positionStyle}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          className="fixed z-50 bg-overlay-background rounded-lg px-2 py-1.5 select-none font-mono backdrop-blur-[6px] border border-overlay-foreground/15 cursor-grab active:cursor-grabbing touch-none"
+          className="group fixed z-50 bg-overlay-background rounded-lg px-2 py-1.5 select-none font-mono backdrop-blur-[6px] border border-overlay-foreground/15 cursor-grab active:cursor-grabbing touch-none"
         >
+          <button
+            type="button"
+            aria-pressed={notesEnabled}
+            title={notesEnabled ? 'notes animation off' : 'notes animation on'}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              setNotesEnabled((enabled) => {
+                if (enabled) {
+                  burstTimersRef.current.forEach(clearTimeout);
+                  burstTimersRef.current = [];
+                  setBursts([]);
+                }
+                return !enabled;
+              });
+            }}
+            className={[
+              'absolute top-1 right-1 z-20 hidden group-hover:flex h-6 w-6 items-center justify-center',
+              'rounded border backdrop-blur-[6px] transition-[background,border-color,color,box-shadow] duration-150 cursor-pointer',
+              notesEnabled
+                ? 'bg-primary text-primary-foreground border-primary shadow-[0_0_6px_color-mix(in_oklab,var(--primary)_35%,transparent)]'
+                : 'bg-overlay-background text-overlay-foreground/50 border-overlay-foreground/20',
+            ].join(' ')}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 18V5l12-2v13" />
+              <circle cx="6" cy="18" r="3" />
+              <circle cx="18" cy="16" r="3" />
+            </svg>
+          </button>
+          {/* 単体ノート ヒットエフェクト */}
+          {bursts.map(({ id, x }) => (
+            <div key={id} className="absolute inset-x-0 top-0 h-0 pointer-events-none z-10">
+              {/* フラッシュ（瞬間的な明滅） */}
+              <div
+                className="absolute top-0 w-[22px] h-[4px] bg-primary animate-bm-flash"
+                style={{
+                  left: `${x}%`,
+                  transform: 'translateX(-50%)',
+                  boxShadow: '0 0 6px 2px color-mix(in oklab, var(--primary) 80%, transparent)',
+                }}
+              />
+              {/* ノート（上昇して消える） */}
+              <div className="absolute top-0" style={{ left: `${x}%`, transform: 'translateX(-50%)' }}>
+                <div
+                  className="w-[22px] h-[4px] bg-primary animate-bm-note"
+                  style={{ boxShadow: '0 0 4px 1px color-mix(in oklab, var(--primary) 70%, transparent)' }}
+                />
+              </div>
+              {/* インパクトリング（楕円が広がって消える） */}
+              <div className="absolute top-0" style={{ left: `${x}%`, transform: 'translateX(-50%)', marginTop: '-3px' }}>
+                <div
+                  className="w-[22px] h-[10px] rounded-full border border-primary animate-bm-ring"
+                  style={{ boxShadow: '0 0 4px 1px color-mix(in oklab, var(--primary) 55%, transparent)' }}
+                />
+              </div>
+            </div>
+          ))}
+
           {ROWS.map((row, ri) => (
             <div
               key={ri}
-              className={`flex gap-0.5 mb-0.5 last:mb-0 justify-start last:justify-center ${ROW_PADDING[ri]}`}
+              className={`flex gap-0.5 mb-0.5 last:mb-0 ${ri === ROWS.length - 1 ? 'justify-center' : 'justify-start'} ${ROW_PADDING[ri]}`}
             >
               {row.map((key) => {
                 const isSpace = key === ' ';
                 const isShift = key === 'lshift' || key === 'rshift';
-                const isActive = activeKey === key || shiftActive === key;
+                const isNext = nextKeys.has(key);
+                const isPressed = pressedKeys.has(key) || shiftActive === key;
+                const isAcceptedPressed = acceptedPressedKeys.has(key);
+                const isMistype = isPressed && !isNext && !isAcceptedPressed;
                 const label = isSpace ? '' : isShift ? '⇧'
                   : shiftActive ? (SHIFT_LABELS[key] ?? key.toUpperCase())
                   : key.toUpperCase();
                 return (
                   <div
                     key={key}
+                    data-key={key}
                     className={[
                       'flex items-center justify-center rounded-[3px] font-semibold border h-5',
                       'transition-[background,color,border-color,box-shadow] duration-[60ms]',
-                      isSpace ? 'w-[108px]' : isShift ? 'w-[42px] text-xs' : 'w-[22px] text-[10px]',
-                      isActive
+                      isSpace ? 'w-[108px]' : isShift ? 'w-[30px] text-xs' : 'w-[22px] text-[10px]',
+                      isNext
                         ? 'bg-primary-light text-primary-foreground border-primary-light shadow-[0_0_8px_color-mix(in_oklab,var(--primary-light)_55%,transparent)]'
+                        : isMistype
+                          ? 'bg-primary-light/35 text-overlay-foreground border-primary-light/45 shadow-[0_0_5px_color-mix(in_oklab,var(--primary-light)_28%,transparent)]'
                         : 'bg-overlay-foreground/10 text-overlay-foreground/50 border-overlay-foreground/12',
                     ].join(' ')}
                   >
