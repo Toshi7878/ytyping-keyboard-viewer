@@ -118,6 +118,8 @@ const positionAtom = atomWithStorage<Position | null>('yt-kbd-position', null);
 const scaleAtom = atomWithStorage<number>('yt-kbd-scale', 1);
 const visibilityModeAtom = atomWithStorage<VisibilityMode>('yt-kbd-visibility-mode', 'always');
 const notesEnabledAtom = atomWithStorage<boolean>('yt-kbd-notes-enabled', false);
+const notesHeightAtom = atomWithStorage<number>('yt-kbd-notes-height', 55);
+const notesSpeedAtom = atomWithStorage<number>('yt-kbd-notes-speed', 100);
 const keyboardLayoutAtom = atomWithStorage<KeyboardLayout>('yt-kbd-layout', 'jis');
 
 
@@ -166,6 +168,8 @@ function KeyboardViewer() {
   const [scale, setScale] = useAtom(scaleAtom);
   const [visibilityMode, setVisibilityMode] = useAtom(visibilityModeAtom);
   const [notesEnabled, setNotesEnabled] = useAtom(notesEnabledAtom);
+  const [notesHeight, setNotesHeight] = useAtom(notesHeightAtom);
+  const [notesSpeed, setNotesSpeed] = useAtom(notesSpeedAtom);
   const [keyboardLayout, setKeyboardLayout] = useAtom(keyboardLayoutAtom);
   const [isVisible, setIsVisible] = useState(false);
   const [isReplayMode, setIsReplayMode] = useState(false);
@@ -268,9 +272,6 @@ function KeyboardViewer() {
   }, [keyboardLayout]);
 
   useEffect(() => {
-    const hook = window.__ytyping_type;
-    if (!hook) return;
-
     const show = () => setIsVisible(true);
     const refreshKey = () => {
       show();
@@ -316,26 +317,43 @@ function KeyboardViewer() {
       burstTimersRef.current = [];
     };
 
-    KEY_REFRESH_EVENTS.forEach((e) => hook.addEventListener(e, updateKey));
-    REPLAY_START_EVENTS.forEach((e) => hook.addEventListener(e, startReplay));
-    hook.addEventListener('replay:success', updateReplayKey);
-    KEY_UPDATE_ONLY_EVENTS.forEach((e) => hook.addEventListener(e, refreshKey));
-    RESET_REPLAY_EVENTS.forEach((e) => hook.addEventListener(e, resetReplayAndUpdateKey));
-    hook.addEventListener('yt:play', onPlay);
-    hook.addEventListener('timer:end', onEnd);
+    let cleanupHook: (() => void) | null = null;
+    const attachHook = () => {
+      const hook = window.__ytyping_type;
+      if (!hook || cleanupHook) return false;
+
+      KEY_REFRESH_EVENTS.forEach((e) => hook.addEventListener(e, updateKey));
+      REPLAY_START_EVENTS.forEach((e) => hook.addEventListener(e, startReplay));
+      hook.addEventListener('replay:success', updateReplayKey);
+      KEY_UPDATE_ONLY_EVENTS.forEach((e) => hook.addEventListener(e, refreshKey));
+      RESET_REPLAY_EVENTS.forEach((e) => hook.addEventListener(e, resetReplayAndUpdateKey));
+      hook.addEventListener('yt:play', onPlay);
+      hook.addEventListener('timer:end', onEnd);
+
+      cleanupHook = () => {
+        KEY_REFRESH_EVENTS.forEach((e) => hook.removeEventListener(e, updateKey));
+        REPLAY_START_EVENTS.forEach((e) => hook.removeEventListener(e, startReplay));
+        hook.removeEventListener('replay:success', updateReplayKey);
+        KEY_UPDATE_ONLY_EVENTS.forEach((e) => hook.removeEventListener(e, refreshKey));
+        RESET_REPLAY_EVENTS.forEach((e) => hook.removeEventListener(e, resetReplayAndUpdateKey));
+        hook.removeEventListener('yt:play', onPlay);
+        hook.removeEventListener('timer:end', onEnd);
+        burstTimersRef.current.forEach(clearTimeout);
+        burstTimersRef.current = [];
+      };
+      return true;
+    };
+
+    attachHook();
+    const hookPollTimer = setInterval(() => {
+      if (attachHook()) clearInterval(hookPollTimer);
+    }, 250);
 
     return () => {
-      KEY_REFRESH_EVENTS.forEach((e) => hook.removeEventListener(e, updateKey));
-      REPLAY_START_EVENTS.forEach((e) => hook.removeEventListener(e, startReplay));
-      hook.removeEventListener('replay:success', updateReplayKey);
-      KEY_UPDATE_ONLY_EVENTS.forEach((e) => hook.removeEventListener(e, refreshKey));
-      RESET_REPLAY_EVENTS.forEach((e) => hook.removeEventListener(e, resetReplayAndUpdateKey));
-      hook.removeEventListener('yt:play', onPlay);
-      hook.removeEventListener('timer:end', onEnd);
-      burstTimersRef.current.forEach(clearTimeout);
-      burstTimersRef.current = [];
+      clearInterval(hookPollTimer);
+      cleanupHook?.();
     };
-  }, []);
+  }, [addBurst]);
 
   // ---- ドラッグ ----
 
@@ -428,42 +446,55 @@ function KeyboardViewer() {
   const positionStyle: React.CSSProperties = position
     ? { left: position.x, top: position.y, transform: `scale(${scale})`, transformOrigin: 'top left' }
     : { right: 12, bottom: 12, transform: `scale(${scale})`, transformOrigin: 'bottom right' };
+  const guideStyle = {
+    ...positionStyle,
+    '--yt-kbd-note-height': `${notesHeight}px`,
+    '--yt-kbd-note-duration': `${Math.round(42000 / notesSpeed)}ms`,
+    '--yt-kbd-ring-duration': `${Math.round(32000 / notesSpeed)}ms`,
+    '--yt-kbd-flash-duration': `${Math.round(24000 / notesSpeed)}ms`,
+  } as React.CSSProperties &
+    Record<
+      '--yt-kbd-note-height' | '--yt-kbd-note-duration' | '--yt-kbd-ring-duration' | '--yt-kbd-flash-duration',
+      string
+    >;
 
   return (
     <>
       {/* トグルボタン（常時表示） */}
-      <button
-        onClick={() => setVisibilityMode((mode) => {
-          const currentIndex = VISIBILITY_MODE_ORDER.indexOf(mode);
-          return VISIBILITY_MODE_ORDER[(currentIndex + 1) % VISIBILITY_MODE_ORDER.length];
-        })}
-        title={VISIBILITY_MODE_LABELS[visibilityMode]}
-        className={[
-          'fixed bottom-3 right-3 z-50 w-9 h-9 flex items-center justify-center',
-          'rounded-lg border backdrop-blur-[6px] transition-[background,border-color,color] duration-150 cursor-pointer',
-          visibilityMode === 'always'
-            ? 'bg-primary text-primary-foreground border-primary'
-            : visibilityMode === 'replay'
-              ? 'bg-overlay-background text-primary border-primary/60'
-              : 'bg-overlay-background text-overlay-foreground/50 border-overlay-foreground/20',
-        ].join(' ')}
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect width="20" height="16" x="2" y="4" rx="2" ry="2"/>
-          <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>
-        </svg>
-        {visibilityMode === 'replay' && (
-          <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded bg-primary px-1 text-[10px] font-bold leading-none text-primary-foreground">
-            R
-          </span>
-        )}
-      </button>
+      {!isGuideVisible && (
+        <button
+          onClick={() => setVisibilityMode((mode) => {
+            const currentIndex = VISIBILITY_MODE_ORDER.indexOf(mode);
+            return VISIBILITY_MODE_ORDER[(currentIndex + 1) % VISIBILITY_MODE_ORDER.length];
+          })}
+          title={VISIBILITY_MODE_LABELS[visibilityMode]}
+          className={[
+            'fixed bottom-3 right-3 z-50 w-9 h-9 flex items-center justify-center',
+            'rounded-lg border backdrop-blur-[6px] transition-[background,border-color,color] duration-150 cursor-pointer',
+            visibilityMode === 'always'
+              ? 'bg-primary text-primary-foreground border-primary'
+              : visibilityMode === 'replay'
+                ? 'bg-overlay-background text-primary border-primary/60'
+                : 'bg-overlay-background text-overlay-foreground/50 border-overlay-foreground/20',
+          ].join(' ')}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect width="20" height="16" x="2" y="4" rx="2" ry="2"/>
+            <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>
+          </svg>
+          {visibilityMode === 'replay' && (
+            <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded bg-primary px-1 text-[10px] font-bold leading-none text-primary-foreground">
+              R
+            </span>
+          )}
+        </button>
+      )}
 
       {/* キーボードパネル（プレイ中 かつ ユーザーが表示中のときのみ） */}
       {isGuideVisible && (
         <div
           ref={containerRef}
-          style={positionStyle}
+          style={guideStyle}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -515,6 +546,37 @@ function KeyboardViewer() {
           >
             {keyboardLayout.toUpperCase()}
           </button>
+          <button
+            type="button"
+            title={VISIBILITY_MODE_LABELS[visibilityMode]}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              setVisibilityMode((mode) => {
+                const currentIndex = VISIBILITY_MODE_ORDER.indexOf(mode);
+                return VISIBILITY_MODE_ORDER[(currentIndex + 1) % VISIBILITY_MODE_ORDER.length];
+              });
+            }}
+            className={[
+              'absolute top-1 right-[66px] z-20 hidden group-hover:flex h-5 w-5 items-center justify-center',
+              'rounded border backdrop-blur-[6px] transition-[background,border-color,color] duration-150 cursor-pointer',
+              visibilityMode === 'always'
+                ? 'bg-primary text-primary-foreground border-primary'
+                : visibilityMode === 'replay'
+                  ? 'bg-overlay-background text-primary border-primary/60'
+                  : 'bg-overlay-background text-overlay-foreground/50 border-overlay-foreground/20',
+            ].join(' ')}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect width="20" height="16" x="2" y="4" rx="2" ry="2"/>
+              <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>
+            </svg>
+            {visibilityMode === 'replay' && (
+              <span className="absolute -top-1 -right-1 flex h-3 min-w-3 items-center justify-center rounded bg-primary px-0.5 text-[8px] font-bold leading-none text-primary-foreground">
+                R
+              </span>
+            )}
+          </button>
           {/* 単体ノート ヒットエフェクト */}
           {bursts.map(({ id, x }) => (
             <div key={id} className="absolute inset-x-0 top-0 h-0 pointer-events-none z-10">
@@ -547,7 +609,7 @@ function KeyboardViewer() {
           {rows.map((row, ri) => (
             <div
               key={ri}
-              className={`flex gap-0.5 mb-0.5 last:mb-0 ${ri === rows.length - 1 ? 'justify-center' : 'justify-start'} ${rowPadding[ri]}`}
+              className={`relative flex gap-0.5 mb-0.5 last:mb-0 ${ri === rows.length - 1 ? 'justify-center' : 'justify-start'} ${rowPadding[ri]}`}
             >
               {row.map((key) => {
                 const isSpace = key === ' ';
@@ -578,6 +640,38 @@ function KeyboardViewer() {
                   </div>
                 );
               })}
+              {row.some((key) => key === ' ') && notesEnabled && (
+                <>
+                  <input
+                    type="range"
+                    min="5"
+                    max="100"
+                    step="5"
+                    value={notesSpeed}
+                    title={`notes speed: ${notesSpeed}%`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onPointerMove={(e) => e.stopPropagation()}
+                    onPointerUp={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setNotesSpeed(Number(e.currentTarget.value))}
+                    className="absolute right-[calc(50%+69px)] top-0 z-20 hidden h-5 w-20 cursor-pointer group-hover:block"
+                  />
+                  <input
+                    type="range"
+                    min="25"
+                    max="200"
+                    step="5"
+                    value={notesHeight}
+                    title={`notes height: ${notesHeight}px`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onPointerMove={(e) => e.stopPropagation()}
+                    onPointerUp={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setNotesHeight(Number(e.currentTarget.value))}
+                    className="absolute left-[calc(50%+69px)] top-0 z-20 hidden h-5 w-20 cursor-pointer group-hover:block"
+                  />
+                </>
+              )}
             </div>
           ))}
 
