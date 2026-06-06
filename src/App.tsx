@@ -7,10 +7,10 @@ import { DAKU_HANDAKU_NORMALIZE_MAP, KEY_TO_KANA, CODE_TO_KANA } from 'lyrics-ty
 
 const KEYBOARD_ROWS = {
   jis: [
-    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '^'],
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '^', 'IntlYen'],
     ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '@', '['],
     ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', ':', ']'],
-    ['lshift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 'rshift'],
+    ['lshift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 'IntlRo', 'rshift'],
     [' '],
   ],
   us: [
@@ -41,10 +41,10 @@ const SHIFT_LABELS: Record<KeyboardLayout, Record<string, string>> = {
   jis: {
     '1': '!', '2': '"', '3': '#', '4': '$', '5': '%',
     '6': '&', '7': "'", '8': '(', '9': ')',
-    '-': '=', '^': '~',
+    '-': '=', '^': '~', IntlYen: '|',
     '@': '`', '[': '{',
     ';': '+', ':': '*', ']': '}',
-    ',': '<', '.': '>', '/': '?',
+    ',': '<', '.': '>', '/': '?', IntlRo: '_',
   },
   us: {
     '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
@@ -56,22 +56,9 @@ const SHIFT_LABELS: Record<KeyboardLayout, Record<string, string>> = {
   },
 };
 
-const KANA_LABELS: Record<KeyboardLayout, Record<string, string>> = {
-  jis: Object.fromEntries(
-    [...KEY_TO_KANA]
-      .map(([key, kanaList]) => [key.length === 1 ? key.toLowerCase() : key, kanaList[0] ?? ''])
-      .filter(([key, label]) => label && KEY_SETS.jis.has(key)),
-  ),
-  us: Object.fromEntries(
-    [...KEY_TO_KANA]
-      .map(([key, kanaList]) => [key.length === 1 ? key.toLowerCase() : key, kanaList[0] ?? ''])
-      .filter(([key, label]) => label && KEY_SETS.us.has(key)),
-  ),
-};
-
-const KEY_LABELS: Record<InputMode, Record<KeyboardLayout, Record<string, string>>> = {
-  roma: SHIFT_LABELS,
-  kana: KANA_LABELS,
+const BASE_KEY_LABELS: Record<string, string> = {
+  IntlYen: '|',
+  IntlRo: '_',
 };
 
 const SHIFT_KEYS: Record<KeyboardLayout, Record<string, string>> = {
@@ -91,6 +78,7 @@ const EVENT_CODE_ALIASES: Record<KeyboardLayout, Record<string, string>> = {
   jis: {
     Minus: '-',
     Equal: '^',
+    IntlYen: 'IntlYen',
     BracketLeft: '@',
     BracketRight: '[',
     Semicolon: ';',
@@ -99,6 +87,7 @@ const EVENT_CODE_ALIASES: Record<KeyboardLayout, Record<string, string>> = {
     Comma: ',',
     Period: '.',
     Slash: '/',
+    IntlRo: 'IntlRo',
   },
   us: {
     Minus: '-',
@@ -114,18 +103,91 @@ const EVENT_CODE_ALIASES: Record<KeyboardLayout, Record<string, string>> = {
   },
 };
 
+function kanaLabel(kanaList: readonly string[], shifted: boolean): string {
+  return (shifted ? kanaList[1] : kanaList[0]) ?? kanaList[0] ?? '';
+}
+
+function codeKanaLabel(code: string, kanaList: readonly string[], shifted: boolean): string {
+  if (shifted && (code === 'IntlYen' || code === 'IntlRo')) return kanaList[0] ?? '';
+  return kanaLabel(kanaList, shifted);
+}
+
+function buildKanaLabels(layout: KeyboardLayout, shifted: boolean): Record<string, string> {
+  const labels: Record<string, string> = {};
+  for (const [key, kanaList] of KEY_TO_KANA) {
+    const normalizedKey = key.length === 1 ? key.toLowerCase() : key;
+    const label = kanaLabel(kanaList, shifted);
+    if (label && KEY_SETS[layout].has(normalizedKey)) {
+      labels[normalizedKey] = label;
+      continue;
+    }
+
+    const shiftedKey = SHIFT_KEYS[layout][key];
+    const shiftedLabel = kanaList[0] ?? '';
+    if (shifted && shiftedKey && shiftedLabel && KEY_SETS[layout].has(shiftedKey)) {
+      labels[shiftedKey] = shiftedLabel;
+    }
+  }
+
+  for (const [code, kanaList] of CODE_TO_KANA) {
+    const key = EVENT_CODE_ALIASES[layout][code];
+    const label = codeKanaLabel(code, kanaList, shifted);
+    if (key && label && KEY_SETS[layout].has(key)) labels[key] = label;
+  }
+
+  return labels;
+}
+
+const KANA_LABELS: Record<KeyboardLayout, Record<'normal' | 'shift', Record<string, string>>> = {
+  jis: {
+    normal: buildKanaLabels('jis', false),
+    shift: buildKanaLabels('jis', true),
+  },
+  us: {
+    normal: buildKanaLabels('us', false),
+    shift: buildKanaLabels('us', true),
+  },
+};
+
+const SHIFT_KANA_TO_KEY = new Map<string, string>([
+  ['ぃ', 'e'],
+  ['っ', 'z'],
+  ['を', '0'],
+]);
+
+const ADDITIONAL_SHIFT_KANA_LABELS = Object.fromEntries(
+  [...SHIFT_KANA_TO_KEY].map(([kana, key]) => [key, kana]),
+);
+
+Object.assign(KANA_LABELS.jis.shift, ADDITIONAL_SHIFT_KANA_LABELS);
+KANA_LABELS.jis.shift['['] = KANA_LABELS.jis.normal['['] ?? '゜';
+KANA_LABELS.jis.shift[']'] = KANA_LABELS.jis.normal[']'] ?? 'む';
+
 const KANA_TO_KEYS = new Map<string, string[]>();
+function addKanaKey(kana: string, key: string): void {
+  if (!kana) return;
+  KANA_TO_KEYS.set(kana, [...new Set([...(KANA_TO_KEYS.get(kana) ?? []), key])]);
+}
+
 for (const [key, kanaList] of KEY_TO_KANA) {
   const normalizedKey = key.length === 1 ? key.toLowerCase() : key;
-  const kana = kanaList[0];
-  if (!kana || !KEY_SETS.jis.has(normalizedKey)) continue;
-  KANA_TO_KEYS.set(kana, [...(KANA_TO_KEYS.get(kana) ?? []), normalizedKey]);
+  if (KEY_SETS.jis.has(normalizedKey)) {
+    kanaList.forEach((kana) => addKanaKey(kana, normalizedKey));
+    continue;
+  }
+
+  const shiftedKey = SHIFT_KEYS.jis[key];
+  if (shiftedKey && KEY_SETS.jis.has(shiftedKey)) {
+    kanaList.forEach((kana) => addKanaKey(kana, shiftedKey));
+  }
 }
 for (const [code, kanaList] of CODE_TO_KANA) {
-  const kana = kanaList[0];
   const key = EVENT_CODE_ALIASES.jis[code];
-  if (!kana || !key) continue;
-  KANA_TO_KEYS.set(kana, [...(KANA_TO_KEYS.get(kana) ?? []), key]);
+  if (!key) continue;
+  kanaList.forEach((kana) => addKanaKey(kana, key));
+}
+for (const [kana, key] of SHIFT_KANA_TO_KEY) {
+  addKanaKey(kana, key);
 }
 
 const VISIBILITY_MODE_ORDER = ['always', 'replay', 'hidden'] as const satisfies readonly VisibilityMode[];
@@ -208,8 +270,8 @@ function resolveNextKeys(layout: KeyboardLayout, inputMode: InputMode): Resolved
 
   const nextValue =
     tempRomaPatterns?.[0]?.[0] ??
-    chunkText ??
-    nextChunk?.romaPatterns?.[0]?.[0];
+    nextChunk?.romaPatterns?.[0]?.[0] ??
+    chunkText;
   const key = normalizeKey(nextValue, layout);
   return key ? { keys: [key], labelMode: inputMode } : { keys: [], labelMode: inputMode };
 }
@@ -253,8 +315,9 @@ function getKeyLabel(
 ) {
   if (key === ' ') return '';
   if (key === 'lshift' || key === 'rshift') return '竍ｧ';
-  if (inputMode === 'kana') return keyLabels[key] ?? key.toUpperCase();
-  return shiftActive ? (keyLabels[key] ?? key.toUpperCase()) : key.toUpperCase();
+  const baseLabel = BASE_KEY_LABELS[key] ?? key.toUpperCase();
+  if (inputMode === 'kana') return keyLabels[key] ?? baseLabel;
+  return shiftActive ? (keyLabels[key] ?? baseLabel) : baseLabel;
 }
 
 function KeyboardViewer() {
@@ -296,7 +359,9 @@ function KeyboardViewer() {
   const rows = KEYBOARD_ROWS[activeKeyboardLayout];
   const rowPadding = ROW_PADDING[activeKeyboardLayout];
   const effectiveLabelMode = inputMode === 'kana' ? keyLabelMode : inputMode;
-  const keyLabels = KEY_LABELS[effectiveLabelMode][activeKeyboardLayout];
+  const keyLabels = effectiveLabelMode === 'kana'
+    ? KANA_LABELS[activeKeyboardLayout][shiftActive ? 'shift' : 'normal']
+    : SHIFT_LABELS[activeKeyboardLayout];
 
   const isGuideVisible =
     isVisible && (visibilityMode === 'always' || (visibilityMode === 'replay' && isReplayMode));
