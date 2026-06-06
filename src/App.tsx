@@ -2,193 +2,24 @@ import { useAtom } from 'jotai';
 import { atomWithStorage } from 'jotai/utils';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChangeInputModeDetail, GameStartDetail } from './index';
+import {
+  getKeyLabel,
+  KANA_LABELS,
+  KanaLabelLayer,
+  KEYBOARD_ROWS,
+  resolveNextKeys,
+  resolvePressedKey,
+  ROW_PADDING,
+  SHIFT_LABELS,
+  type InputMode,
+  type KeyboardLayout,
+} from './keyboard';
 import { usePathname } from './utils/spa-navigate';
-import { DAKU_HANDAKU_NORMALIZE_MAP, KEY_TO_KANA, CODE_TO_KANA } from 'lyrics-typing-engine';
-
-const KEYBOARD_ROWS = {
-  jis: [
-    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '^', 'IntlYen'],
-    ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '@', '['],
-    ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', ':', ']'],
-    ['lshift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 'IntlRo', 'rshift'],
-    [' '],
-  ],
-  us: [
-    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '='],
-    ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\\'],
-    ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', "'"],
-    ['lshift', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 'rshift'],
-    [' '],
-  ],
-} as const satisfies Record<KeyboardLayout, readonly (readonly string[])[]>;
-
-const KEY_SETS = {
-  jis: new Set<string>(KEYBOARD_ROWS.jis.flat()),
-  us: new Set<string>(KEYBOARD_ROWS.us.flat()),
-} as const satisfies Record<KeyboardLayout, ReadonlySet<string>>;
 
 const KEY_REFRESH_EVENTS = ['type:success'] as const;
 
 const KEY_UPDATE_ONLY_EVENTS = ['timer:lineChange'] as const;
 const RESET_REPLAY_EVENTS = ['restart'] as const;
-
-const ROW_PADDING = {
-  jis: ['', 'pl-3', 'pl-[18px]', '', ''],
-  us: ['', '', 'pl-[18px]', '', ''],
-} as const satisfies Record<KeyboardLayout, readonly string[]>;
-
-const SHIFT_LABELS: Record<KeyboardLayout, Record<string, string>> = {
-  jis: {
-    '1': '!', '2': '"', '3': '#', '4': '$', '5': '%',
-    '6': '&', '7': "'", '8': '(', '9': ')',
-    '-': '=', '^': '~', IntlYen: '|',
-    '@': '`', '[': '{',
-    ';': '+', ':': '*', ']': '}',
-    ',': '<', '.': '>', '/': '?', IntlRo: '_',
-  },
-  us: {
-    '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
-    '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
-    '-': '_', '=': '+',
-    '[': '{', ']': '}', '\\': '|',
-    ';': ':', "'": '"',
-    ',': '<', '.': '>', '/': '?',
-  },
-};
-
-const BASE_KEY_LABELS: Record<string, string> = {
-  IntlYen: '|',
-  IntlRo: '_',
-};
-
-const SHIFT_KEYS: Record<KeyboardLayout, Record<string, string>> = {
-  jis: Object.fromEntries(
-    Object.entries(SHIFT_LABELS.jis).map(([key, shifted]) => [shifted, key]),
-  ),
-  us: Object.fromEntries(
-    Object.entries(SHIFT_LABELS.us).map(([key, shifted]) => [shifted, key]),
-  ),
-};
-
-const EVENT_KEY_ALIASES: Record<string, string> = {
-  Spacebar: ' ',
-};
-
-const EVENT_CODE_ALIASES: Record<KeyboardLayout, Record<string, string>> = {
-  jis: {
-    Minus: '-',
-    Equal: '^',
-    IntlYen: 'IntlYen',
-    BracketLeft: '@',
-    BracketRight: '[',
-    Semicolon: ';',
-    Quote: ':',
-    Backslash: ']',
-    Comma: ',',
-    Period: '.',
-    Slash: '/',
-    IntlRo: 'IntlRo',
-  },
-  us: {
-    Minus: '-',
-    Equal: '=',
-    BracketLeft: '[',
-    BracketRight: ']',
-    Backslash: '\\',
-    Semicolon: ';',
-    Quote: "'",
-    Comma: ',',
-    Period: '.',
-    Slash: '/',
-  },
-};
-
-function kanaLabel(kanaList: readonly string[], shifted: boolean): string {
-  return (shifted ? kanaList[1] : kanaList[0]) ?? kanaList[0] ?? '';
-}
-
-function codeKanaLabel(code: string, kanaList: readonly string[], shifted: boolean): string {
-  if (shifted && (code === 'IntlYen' || code === 'IntlRo')) return kanaList[0] ?? '';
-  return kanaLabel(kanaList, shifted);
-}
-
-function buildKanaLabels(layout: KeyboardLayout, shifted: boolean): Record<string, string> {
-  const labels: Record<string, string> = {};
-  for (const [key, kanaList] of KEY_TO_KANA) {
-    const normalizedKey = key.length === 1 ? key.toLowerCase() : key;
-    const label = kanaLabel(kanaList, shifted);
-    if (label && KEY_SETS[layout].has(normalizedKey)) {
-      labels[normalizedKey] = label;
-      continue;
-    }
-
-    const shiftedKey = SHIFT_KEYS[layout][key];
-    const shiftedLabel = kanaList[0] ?? '';
-    if (shifted && shiftedKey && shiftedLabel && KEY_SETS[layout].has(shiftedKey)) {
-      labels[shiftedKey] = shiftedLabel;
-    }
-  }
-
-  for (const [code, kanaList] of CODE_TO_KANA) {
-    const key = EVENT_CODE_ALIASES[layout][code];
-    const label = codeKanaLabel(code, kanaList, shifted);
-    if (key && label && KEY_SETS[layout].has(key)) labels[key] = label;
-  }
-
-  return labels;
-}
-
-const KANA_LABELS: Record<KeyboardLayout, Record<'normal' | 'shift', Record<string, string>>> = {
-  jis: {
-    normal: buildKanaLabels('jis', false),
-    shift: buildKanaLabels('jis', true),
-  },
-  us: {
-    normal: buildKanaLabels('us', false),
-    shift: buildKanaLabels('us', true),
-  },
-};
-
-const SHIFT_KANA_TO_KEY = new Map<string, string>([
-  ['ぃ', 'e'],
-  ['っ', 'z'],
-  ['を', '0'],
-]);
-
-const ADDITIONAL_SHIFT_KANA_LABELS = Object.fromEntries(
-  [...SHIFT_KANA_TO_KEY].map(([kana, key]) => [key, kana]),
-);
-
-Object.assign(KANA_LABELS.jis.shift, ADDITIONAL_SHIFT_KANA_LABELS);
-KANA_LABELS.jis.shift['['] = KANA_LABELS.jis.normal['['] ?? '゜';
-KANA_LABELS.jis.shift[']'] = KANA_LABELS.jis.normal[']'] ?? 'む';
-
-const KANA_TO_KEYS = new Map<string, string[]>();
-function addKanaKey(kana: string, key: string): void {
-  if (!kana) return;
-  KANA_TO_KEYS.set(kana, [...new Set([...(KANA_TO_KEYS.get(kana) ?? []), key])]);
-}
-
-for (const [key, kanaList] of KEY_TO_KANA) {
-  const normalizedKey = key.length === 1 ? key.toLowerCase() : key;
-  if (KEY_SETS.jis.has(normalizedKey)) {
-    kanaList.forEach((kana) => addKanaKey(kana, normalizedKey));
-    continue;
-  }
-
-  const shiftedKey = SHIFT_KEYS.jis[key];
-  if (shiftedKey && KEY_SETS.jis.has(shiftedKey)) {
-    kanaList.forEach((kana) => addKanaKey(kana, shiftedKey));
-  }
-}
-for (const [code, kanaList] of CODE_TO_KANA) {
-  const key = EVENT_CODE_ALIASES.jis[code];
-  if (!key) continue;
-  kanaList.forEach((kana) => addKanaKey(kana, key));
-}
-for (const [kana, key] of SHIFT_KANA_TO_KEY) {
-  addKanaKey(kana, key);
-}
 
 const VISIBILITY_MODE_ORDER = ['always', 'replay', 'hidden'] as const satisfies readonly VisibilityMode[];
 const VISIBILITY_MODE_LABELS: Record<VisibilityMode, string> = {
@@ -200,8 +31,6 @@ const VISIBILITY_MODE_LABELS: Record<VisibilityMode, string> = {
 type Position = { x: number; y: number };
 type ResizeCorner = 'tl' | 'tr' | 'bl' | 'br';
 type VisibilityMode = 'always' | 'replay' | 'hidden';
-type KeyboardLayout = 'jis' | 'us';
-type InputMode = 'kana' | 'roma';
 type ResizeState = {
   corner: ResizeCorner;
   anchorX: number; // 反対の角のX座標 (viewport基準)
@@ -227,68 +56,6 @@ const CORNERS: { corner: ResizeCorner; cls: string; cursor: string }[] = [
   { corner: 'br', cls: 'bottom-0 right-0 border-b border-r', cursor: 'cursor-nwse-resize' },
 ];
 
-function firstStringValue(source: unknown, keys: readonly string[]): string | null {
-  if (typeof source !== 'object' || source === null) return null;
-  const record = source as Record<string, unknown>;
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === 'string' && value) return value;
-  }
-  return null;
-}
-
-function normalizeKana(kana: string): string {
-  return DAKU_HANDAKU_NORMALIZE_MAP[kana as keyof typeof DAKU_HANDAKU_NORMALIZE_MAP] ?? kana;
-
-}
-
-type ResolvedKeys = { keys: string[]; labelMode: InputMode };
-
-function resolveKanaKeys(value: string | undefined, layout: KeyboardLayout): ResolvedKeys {
-  if (!value) return { keys: [], labelMode: 'kana' };
-
-  const normalizedKey = normalizeKey(value[0], layout);
-  if (normalizedKey) return { keys: [normalizedKey], labelMode: 'roma' };
-
-  const kana = normalizeKana(value[0]);
-  const keys = (KANA_TO_KEYS.get(kana) ?? []).filter((key) => KEY_SETS[layout].has(key));
-  return { keys, labelMode: 'kana' };
-}
-
-function resolveNextKeys(layout: KeyboardLayout, inputMode: InputMode): ResolvedKeys {
-  const word = window.__ytyping_type?.getTypingWord();
-  if (!word) return { keys: [], labelMode: inputMode };
-  const { nextChunk, tempRomaPatterns } = word;
-  const chunkText = firstStringValue(nextChunk, ['kana', 'char', 'text', 'word']);
-  if (inputMode === 'kana') {
-    const resolved = resolveKanaKeys(chunkText ?? tempRomaPatterns?.[0]?.[0] ?? nextChunk?.romaPatterns?.[0]?.[0], layout);
-    if (resolved.keys.length > 0) return resolved;
-    const romaValue = tempRomaPatterns?.[0]?.[0] ?? nextChunk?.romaPatterns?.[0]?.[0];
-    const key = normalizeKey(romaValue, 'jis');
-    return key ? { keys: [key], labelMode: 'roma' } : { keys: [], labelMode: 'kana' };
-  }
-
-  const nextValue =
-    tempRomaPatterns?.[0]?.[0] ??
-    nextChunk?.romaPatterns?.[0]?.[0] ??
-    chunkText;
-  const key = normalizeKey(nextValue, layout);
-  return key ? { keys: [key], labelMode: inputMode } : { keys: [], labelMode: inputMode };
-}
-
-function normalizeKey(key: string | undefined, layout: KeyboardLayout): string | null {
-  if (!key) return null;
-  if (key === ' ') return ' ';
-
-  const normalizedKey = EVENT_KEY_ALIASES[key] ?? SHIFT_KEYS[layout][key] ?? key.toLowerCase();
-  return KEY_SETS[layout].has(normalizedKey) ? normalizedKey : null;
-}
-
-function resolvePressedKey(e: KeyboardEvent, layout: KeyboardLayout): string | null {
-  if (e.key === 'Shift') return e.location === 1 ? 'lshift' : 'rshift';
-  return normalizeKey(e.key, layout) ?? normalizeKey(EVENT_CODE_ALIASES[layout][e.code], layout);
-}
-
 function isReplayScene(detail?: unknown): boolean {
   if (typeof detail === 'object' && detail !== null && 'scene' in detail) {
     return (detail as { scene?: unknown }).scene === 'replay';
@@ -307,19 +74,6 @@ function readInputModeFromHook(): InputMode | null {
   return normalizeInputMode(getInputMode);
 }
 
-function getKeyLabel(
-  key: string,
-  inputMode: InputMode,
-  shiftActive: 'lshift' | 'rshift' | false,
-  keyLabels: Record<string, string>,
-) {
-  if (key === ' ') return '';
-  if (key === 'lshift' || key === 'rshift') return '竍ｧ';
-  const baseLabel = BASE_KEY_LABELS[key] ?? key.toUpperCase();
-  if (inputMode === 'kana') return keyLabels[key] ?? baseLabel;
-  return shiftActive ? (keyLabels[key] ?? baseLabel) : baseLabel;
-}
-
 function KeyboardViewer() {
   const [nextKeys, setNextKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [pressedKeys, setPressedKeys] = useState<ReadonlySet<string>>(() => new Set());
@@ -333,6 +87,7 @@ function KeyboardViewer() {
   const [keyboardLayout, setKeyboardLayout] = useAtom(keyboardLayoutAtom);
   const [inputMode, setInputMode] = useState<InputMode>('roma');
   const [keyLabelMode, setKeyLabelMode] = useState<InputMode>('roma');
+  const [nextLabelLayer, setNextLabelLayer] = useState<KanaLabelLayer>('normal');
   const [isVisible, setIsVisible] = useState(false);
   const [isReplayMode, setIsReplayMode] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -359,8 +114,10 @@ function KeyboardViewer() {
   const rows = KEYBOARD_ROWS[activeKeyboardLayout];
   const rowPadding = ROW_PADDING[activeKeyboardLayout];
   const effectiveLabelMode = inputMode === 'kana' ? keyLabelMode : inputMode;
+  const showShiftLayer = Boolean(shiftActive) || nextLabelLayer === 'shift';
+  const kanaLabelLayer = showShiftLayer ? 'shift' : 'normal';
   const keyLabels = effectiveLabelMode === 'kana'
-    ? KANA_LABELS[activeKeyboardLayout][shiftActive ? 'shift' : 'normal']
+    ? KANA_LABELS[activeKeyboardLayout][kanaLabelLayer]
     : SHIFT_LABELS[activeKeyboardLayout];
 
   const isGuideVisible =
@@ -432,10 +189,13 @@ function KeyboardViewer() {
   }, [addBurst]);
 
   useEffect(() => {
-    const { keys, labelMode } = resolveNextKeys(keyboardLayout, inputMode);
+    const { keys, labelMode, labelLayer } = resolveNextKeys(keyboardLayout, inputMode);
     nextKeysRef.current = new Set(keys);
     setNextKeys(new Set(keys));
-    setKeyLabelMode(labelMode);
+    if (!(inputMode === 'kana' && keys.length === 0)) {
+      setKeyLabelMode(labelMode);
+      setNextLabelLayer(labelLayer ?? 'normal');
+    }
     setPressedKeys(new Set());
     setAcceptedPressedKeys(new Set());
     setShiftActive(false);
@@ -452,10 +212,13 @@ function KeyboardViewer() {
     const refreshKey = (syncHookInputMode = true) => {
       show();
       if (syncHookInputMode) syncInputMode(readInputModeFromHook());
-      const { keys, labelMode } = resolveNextKeys(keyboardLayoutRef.current, inputModeRef.current);
+      const { keys, labelMode, labelLayer } = resolveNextKeys(keyboardLayoutRef.current, inputModeRef.current);
       nextKeysRef.current = new Set(keys);
       setNextKeys(new Set(keys));
-      setKeyLabelMode(labelMode);
+      if (!(inputModeRef.current === 'kana' && keys.length === 0)) {
+        setKeyLabelMode(labelMode);
+        setNextLabelLayer(labelLayer ?? 'normal');
+      }
     };
     const changeInputMode = ({ newInputMode }: ChangeInputModeDetail) => {
       syncInputMode(normalizeInputMode(newInputMode));
@@ -495,6 +258,7 @@ function KeyboardViewer() {
       setIsReplayMode(false);
       nextKeysRef.current = new Set();
       setNextKeys(new Set());
+      setNextLabelLayer('normal');
       setPressedKeys(new Set());
       setAcceptedPressedKeys(new Set());
       setBursts([]);
@@ -816,7 +580,7 @@ function KeyboardViewer() {
                     data-key={key}
                     className={[
                       'flex items-center justify-center rounded-[3px] font-semibold border h-5',
-                      'transition-[background,color,border-color,box-shadow] duration-[60ms]',
+                      'transition-[background,color,border-color,box-shadow] duration-60',
                       isSpace ? 'w-[130px]' : isShift ? 'w-[30px] text-xs' : 'w-[22px] text-[10px]',
                       isNext
                         ? 'bg-primary-light text-primary-foreground border-primary-light shadow-[0_0_8px_color-mix(in_oklab,var(--primary-light)_55%,transparent)]'
@@ -825,7 +589,7 @@ function KeyboardViewer() {
                         : 'bg-overlay-foreground/10 text-overlay-foreground/50 border-overlay-foreground/12',
                     ].join(' ')}
                   >
-                    {getKeyLabel(key, effectiveLabelMode, shiftActive, keyLabels)}
+                    {getKeyLabel(key, effectiveLabelMode,  showShiftLayer, keyLabels)}
                   </div>
                 );
               })}
