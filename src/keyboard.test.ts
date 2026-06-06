@@ -78,7 +78,7 @@ describe('キーボードのキー解決', () => {
     expect(resolveNextKeys('jis', 'kana')).toEqual({
       keys: ['a'],
       labelMode: 'roma',
-      labelLayer: 'shift',
+      labelLayer: 'normal',
     });
   });
 
@@ -107,6 +107,16 @@ describe('キーボードのキー解決', () => {
     expect(normalizeKey('(', 'jis')).toBe('8');
     expect(resolvePressedKey({ key: '\\', code: 'IntlYen' } as KeyboardEvent, 'jis')).toBe('IntlYen');
     expect(resolvePressedKey({ key: '_', code: 'IntlRo' } as KeyboardEvent, 'jis')).toBe('IntlRo');
+  });
+
+  it('ローマ字入力中の英語大文字ではShiftレイヤーにしない', () => {
+    stubTypingWord({ kana: 'A', romaPatterns: ['A'], type: 'alphabet' }, ['A']);
+
+    expect(resolveNextKeys('jis', 'roma')).toEqual({
+      keys: ['a'],
+      labelMode: 'roma',
+      labelLayer: 'normal',
+    });
   });
 });
 

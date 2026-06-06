@@ -15,6 +15,7 @@ import {
   type KeyboardLayout,
 } from './keyboard';
 import { usePathname } from './utils/spa-navigate';
+import { getActiveKeyboardLayout, shouldApplyResolvedLabel } from './viewer-state';
 
 const KEY_REFRESH_EVENTS = ['type:success'] as const;
 
@@ -108,7 +109,7 @@ function KeyboardViewer() {
   notesEnabledRef.current = notesEnabled;
   inputModeRef.current = inputMode;
 
-  const activeKeyboardLayout = inputMode === 'kana' ? 'jis' : keyboardLayout;
+  const activeKeyboardLayout = getActiveKeyboardLayout(inputMode, keyboardLayout);
   keyboardLayoutRef.current = activeKeyboardLayout;
 
   const rows = KEYBOARD_ROWS[activeKeyboardLayout];
@@ -189,17 +190,17 @@ function KeyboardViewer() {
   }, [addBurst]);
 
   useEffect(() => {
-    const { keys, labelMode, labelLayer } = resolveNextKeys(keyboardLayout, inputMode);
+    const { keys, labelMode, labelLayer } = resolveNextKeys(activeKeyboardLayout, inputMode);
     nextKeysRef.current = new Set(keys);
     setNextKeys(new Set(keys));
-    if (!(inputMode === 'kana' && keys.length === 0)) {
+    if (shouldApplyResolvedLabel(keys, labelMode, inputMode)) {
       setKeyLabelMode(labelMode);
       setNextLabelLayer(labelLayer ?? 'normal');
     }
     setPressedKeys(new Set());
     setAcceptedPressedKeys(new Set());
     setShiftActive(false);
-  }, [keyboardLayout, inputMode]);
+  }, [activeKeyboardLayout, inputMode]);
 
   useEffect(() => {
     const show = () => setIsVisible(true);
@@ -209,20 +210,21 @@ function KeyboardViewer() {
         setInputMode(nextInputMode);
       }
     };
-    const refreshKey = (syncHookInputMode = true) => {
-      show();
-      if (syncHookInputMode) syncInputMode(readInputModeFromHook());
-      const { keys, labelMode, labelLayer } = resolveNextKeys(keyboardLayoutRef.current, inputModeRef.current);
+    const applyResolvedKey = ({ keys, labelMode, labelLayer }: ReturnType<typeof resolveNextKeys>) => {
       nextKeysRef.current = new Set(keys);
       setNextKeys(new Set(keys));
-      if (!(inputModeRef.current === 'kana' && keys.length === 0)) {
+      if (shouldApplyResolvedLabel(keys, labelMode, inputModeRef.current)) {
         setKeyLabelMode(labelMode);
         setNextLabelLayer(labelLayer ?? 'normal');
       }
     };
+    const refreshKey = () => {
+      show();
+      applyResolvedKey(resolveNextKeys(keyboardLayoutRef.current, inputModeRef.current));
+    };
     const changeInputMode = ({ newInputMode }: ChangeInputModeDetail) => {
       syncInputMode(normalizeInputMode(newInputMode));
-      refreshKey(false);
+      refreshKey();
     };
     const updateKey = () => {
       setIsReplayMode(false);
@@ -238,8 +240,17 @@ function KeyboardViewer() {
       setIsReplayMode(true);
       refreshKey();
     };
+    const startPlay = () => {
+      setIsReplayMode(false);
+      refreshKey();
+    };
     const onStart = ({ scene }: GameStartDetail) => {
-      if (scene === 'replay') startReplay();
+      if (scene === 'replay') {
+        startReplay();
+        return;
+      }
+
+      startPlay();
     };
     const onPlay = (detail: unknown) => {
       if (isReplayScene(detail)) {

@@ -205,7 +205,7 @@ function resolveKeyLabelLayer(value: string | undefined, layout: KeyboardLayout)
   if (!value) return 'normal';
   const key = value[0];
   if (SHIFT_KEYS[layout][key]) return 'shift';
-  return key.length === 1 && key.toUpperCase() === key && key.toLowerCase() !== key ? 'shift' : 'normal';
+  return 'normal';
 }
 
 function resolveAnyKeyLabelLayer(layout: KeyboardLayout, ...values: (string | undefined | null)[]): KanaLabelLayer {
