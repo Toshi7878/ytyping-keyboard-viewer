@@ -43,7 +43,7 @@ export function usePathname(): string {
 
   useEffect(() => {
     SPANavigate.on(setPathname);
-    return () => SPANavigate.off(setPathname);
+    return () => { SPANavigate.off(setPathname); };
   }, []);
 
   return pathname;
